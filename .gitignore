@@ -1,0 +1,6 @@
+# 인증키는 절대 커밋하지 않는다
+.krx_api_key
+.streamlit/secrets.toml
+.env
+__pycache__/
+*.pyc
