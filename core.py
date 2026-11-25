@@ -33,7 +33,9 @@ def update_cache(df: pd.DataFrame, key: str | None, max_days: int = 40, progress
     """캐시 마지막 날 다음 날부터 최근 거래일까지 KRX에서 새로 받아 붙인다.
     반환: (데이터, 새로 받은 거래일 목록, 오류 메시지 또는 None)"""
     if not key:
-        return df, [], "KRX 인증키가 없어 저장된 데이터로만 실행합니다."
+        import krx_api
+        why = krx_api.KEY_PROBLEM or "KRX 인증키가 없어요."
+        return df, [], f"{why} 저장된 데이터로 실행합니다."
     today = kst_today()
     last = df["일자"].max().date() if len(df) else today - timedelta(days=400)
     days = list(weekdays(last + timedelta(days=1), today))[-max_days:]
@@ -46,8 +48,8 @@ def update_cache(df: pd.DataFrame, key: str | None, max_days: int = 40, progress
             if len(x):           # 휴장일·아직 미집계(당일 장중)면 비어 있음
                 new.append(x)
                 got.append(d)
-    except KRXError as e:
-        return _append(df, new), got, str(e)
+    except Exception as e:   # 네트워크·인증 등 어떤 오류든 앱은 저장 데이터로 계속 돈다
+        return _append(df, new), got, f"KRX 호출 실패({type(e).__name__}: {str(e)[:120]}) 저장된 데이터로 실행합니다."
     df = _append(df, new)
     if new:
         try:

@@ -22,9 +22,22 @@ class KRXError(RuntimeError):
     pass
 
 
+KEY_PROBLEM = None   # 키가 잘못됐을 때 화면에 보여줄 이유
+
+
 def get_key() -> str | None:
     """인증키 찾는 순서: Streamlit secrets → 환경변수 KRX_API_KEY → .krx_api_key 파일.
-    키는 저장소에 올리지 않는다(.gitignore)."""
+    키는 저장소에 올리지 않는다(.gitignore). 영문·숫자가 아닌 글자가 섞이면(예: 예시 문구를
+    그대로 붙여 넣음) HTTP 헤더에 넣을 수 없어 앱이 멈추므로, 그런 키는 없는 것으로 본다."""
+    global KEY_PROBLEM
+    k = _find_key()
+    if k and not k.isascii():
+        KEY_PROBLEM = "인증키에 한글 등 영문·숫자가 아닌 글자가 섞여 있어요. Secrets의 KRX_API_KEY 값을 확인하세요."
+        return None
+    return k
+
+
+def _find_key() -> str | None:
     try:
         import streamlit as st
         if "KRX_API_KEY" in st.secrets:
