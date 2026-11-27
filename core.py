@@ -19,7 +19,7 @@ from krx_api import fetch_day, weekdays, kst_today, KRXError
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "etf_daily.parquet")
 # 신호 계산 방식(컬럼)이 바뀔 때마다 올린다. app.py의 캐시 키에 들어가서,
 # 재배포 후 옛 형식의 캐시가 남아 KeyError가 나는 것을 막는다.
-ENGINE_VERSION = 2
+ENGINE_VERSION = 3
 WINDOW = 20
 Z_TH = 2.0
 H = [1, 5, 20]
@@ -70,14 +70,14 @@ def _append(df, new):
 
 
 # ---------------------------------------------------------------- 지표
-def add_signals(df: pd.DataFrame) -> pd.DataFrame:
+def add_signals(df: pd.DataFrame, window: int = WINDOW, z_th: float = Z_TH) -> pd.DataFrame:
     """종목별로 괴리율, 20일 기준선, Z, 위험일, 1·5·20일 뒤 변화를 붙인다."""
     df = df.dropna(subset=["종가", "NAV"])
     df = df[df["NAV"] > 0].sort_values(["종목코드", "일자"]).reset_index(drop=True)
     df["괴리율"] = (df["종가"] - df["NAV"]) / df["NAV"] * 100
     g = df.groupby("종목코드", sort=False)["괴리율"]
     prev = g.shift(1)
-    roll = prev.groupby(df["종목코드"], sort=False).rolling(WINDOW, min_periods=WINDOW)
+    roll = prev.groupby(df["종목코드"], sort=False).rolling(window, min_periods=window)
     df["기준평균"] = roll.mean().reset_index(level=0, drop=True)
     df["기준표준편차"] = roll.std(ddof=1).reset_index(level=0, drop=True)
     sd = df["기준표준편차"].where(df["기준표준편차"] > 1e-6)
@@ -94,7 +94,7 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["NAV주도"] = (nav_r < -0.2) & (-nav_r >= 0.6 * d_chg)
     # 거래가 없던 날(거래정지 등)은 가격이 멈춰 있어 괴리율이 비정상이므로 판정 제외
     tradable = df["거래량"].fillna(0) > 0
-    df["위험일"] = (df["Z"] > Z_TH) & (df["괴리율"] > 0) & tradable
+    df["위험일"] = (df["Z"] > z_th) & (df["괴리율"] > 0) & tradable
     for h in H:
         fut_d = g.shift(-h)
         fut_p = df.groupby("종목코드", sort=False)["종가"].shift(-h)

@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import core
+import strategy as S
 from krx_api import get_key
 
 st.set_page_config(page_title="ETF 괴리율 경보기", page_icon="🚨", layout="centered",
@@ -102,7 +103,10 @@ with st.sidebar:
             "- 거래량 0(거래정지)과 KRX 휴장일 빈 행은 제외")
 
 # ---------------------------------------------------------------- 상단 내비게이션
-page = st.radio("화면", ["🚨 오늘의 경보", "🔎 종목 분석", "✅ 검증"], key="page",
+PAGES = ["🚨 오늘의 경보", "🔎 종목 분석", "🧪 전략 실험", "✅ 검증"]
+if st.session_state.get("page") not in PAGES:   # 옛 버전 세션에 남은 화면 이름 대비
+    st.session_state.page = PAGES[0]
+page = st.radio("화면", PAGES, key="page",
                 horizontal=True, label_visibility="collapsed")
 status = "📦 오프라인 모드 · 저장 데이터" if st.session_state.offline else \
     (f"🟢 KRX 실시간 · 방금 {len(got)}거래일 새로 받음" if got else "🟢 KRX 연결됨 · 최신 상태")
@@ -338,4 +342,115 @@ def page_check():
                 f"- 하루 등락이 가격제한폭 근처였던 극단일 **{int(sig['극단일'].sum())}건**은 차트에 ✕로 따로 표시해요.")
 
 
-{"🚨 오늘의 경보": page_alarm, "🔎 종목 분석": page_ticker, "✅ 검증": page_check}[page]()
+# ---------------------------------------------------------------- 화면 4: 전략 실험
+REPORT4 = list(PRESETS.values())
+
+
+@st.cache_data(show_spinner="1년치 전략 계산 중…")
+def run_strategies(scope: str, last_day, engine_version: int):
+    sig_all = sig if scope == "전체 ETF" else sig[sig["종목코드"].isin(REPORT4)]
+    start = last_day - pd.Timedelta(days=365)
+    gap = 0.5 if scope == "전체 ETF" else 0.0
+    bt = S.timing_backtest(sig_all, start, last_day)
+    d0 = S.discount_strategy(sig_all, start, last_day, min_gap=gap, lag=0)
+    d1 = S.discount_strategy(sig_all, start, last_day, min_gap=gap, lag=1)
+    return bt, d0, d1
+
+
+@st.cache_data(show_spinner="민감도 격자 계산 중…")
+def run_sensitivity(last_day, engine_version: int):
+    return S.sensitivity(core.load_cache(), REPORT4, last_day - pd.Timedelta(days=365), last_day)
+
+
+def short_name(code):
+    return {v: k.replace(" (대조군)", "") for k, v in PRESETS.items()}.get(code, names.get(code, code))
+
+
+def page_lab():
+    st.markdown(f'<div class="lead">지난 1년({(latest - pd.Timedelta(days=365)):%Y-%m-%d} ~ {latest:%Y-%m-%d}) 데이터로 '
+                '경보를 실제로 썼다면 어땠을지 세 가지로 실험해요. 성과는 모두 <b>NAV 대비</b>로 재요. '
+                '시장이 오르내린 효과는 빼고, 괴리 때문에 생긴 이득·손해만 보기 위해서예요.</div>', unsafe_allow_html=True)
+    scope = st.pills("대상", ["보고서 4종", "전체 ETF"], default="보고서 4종", key="lab_scope")
+    scope = scope or "보고서 4종"
+    bt, d0, d1 = run_strategies(scope, latest, core.ENGINE_VERSION)
+    tab1, tab2, tab3 = st.tabs(["① 매수 타이밍", "② 할인일 전략", "③ 민감도"])
+
+    with tab1:
+        s = S.summarize_timing(bt)
+        if not s["n"]:
+            st.info("이 기간에 위험일이 없어요.")
+        else:
+            st.markdown(f"""<div class="hero green"><div class="big">하루만 기다려도 평균 {s['절약1']:.2f}%p 덜 비싸게</div>
+<div class="one">위험일 {s['n']:,}번 중 <b>{s['유리1']:.0f}%</b>에서 다음 날 사는 게 프리미엄이 더 작았어요.
+Z가 1 아래로 내려올 때까지(최대 {S.MAX_WAIT}일, 평균 {s['대기일']:.1f}일) 기다리면 평균 <b>{s['절약N']:.2f}%p</b> 절약,
+<b>{s['유리N']:.0f}%</b>에서 유리했어요.</div></div>""", unsafe_allow_html=True)
+            g = bt.groupby("종목코드").agg(위험일=("일자", "size"), 하루대기=("1일 대기 절약", "mean"),
+                                         정상화대기=("정상화 대기 절약", "mean")).reset_index()
+            g.insert(0, "종목", g.pop("종목코드").map(short_name))
+            g = g.sort_values("위험일", ascending=False).head(15)
+            st.dataframe(g.rename(columns={"하루대기": "하루 대기", "정상화대기": "정상화까지"}).round(2),
+                         hide_index=True, use_container_width=True)
+            st.caption("표의 숫자는 평균 절약(%p). 절약 = 위험일 괴리율 − 실제로 산 날 괴리율. 장중에는 실시간 iNAV로 괴리율을 볼 수 있어서 "
+                       "'위험일인 걸 알고 그날 안 산다'는 가정이 가능해요. 기다리는 동안 시장 자체가 움직이는 위험은 "
+                       "NAV에 그대로 반영되므로 여기서는 빼고 봤어요.")
+
+    with tab2:
+        a0, a1 = S.summarize_discount(d0), S.summarize_discount(d1)
+        if not a0["n"]:
+            st.info("이 기간에 할인일이 없어요.")
+        else:
+            st.markdown(f"""<div class="hero {'green' if a1.get('순초과', 0) > 0 else 'red'}">
+<div class="big">당일 매수 {a0['순초과']:+.2f}%p · 다음 날 매수 {a1['순초과']:+.2f}%p</div>
+<div class="one">할인일(Z&lt;−2)에 사서 괴리가 평소 수준으로 돌아오면 파는 전략, 거래 {a0['n']:,}번
+(평균 {a0['보유일']:.1f}일 보유). 거래비용 {S.COST:.2f}%p를 뺀 NAV 대비 순이익이에요.
+<b>다음 날 사면 이익이 크게 줄어요.</b> 괴리 대부분이 하루 만에 회복되기 때문이에요.</div></div>""",
+                        unsafe_allow_html=True)
+            tbl = pd.DataFrame({
+                "매수": ["당일", "다음 날"],
+                "거래": [a0["n"], a1.get("n", 0)],
+                "순이익": [pct(a0["순초과"]).replace("%", "%p"), pct(a1.get("순초과", np.nan)).replace("%", "%p")],
+                "승률": [pct(a0["승률"], 0, False), pct(a1.get("승률", np.nan), 0, False)],
+                "가격 수익률": [pct(a0["가격"]), pct(a1.get("가격", np.nan))],
+            })
+            st.dataframe(tbl, hide_index=True, use_container_width=True)
+            st.caption(f"순이익 = 거래비용을 뺀 NAV 대비 이익. 매도 = 괴리율이 매수 때 기준(직전 20일 평균) 이상으로 돌아온 첫날, 최대 {S.MAX_HOLD}거래일. "
+                       f"거래비용 {S.COST:.2f}%p(수수료+호가 차이)는 가정값이에요. '가격 수익률'은 시장 방향까지 포함한 "
+                       "손익이라 NAV 대비 이익과 달라요. 전체 ETF에서는 괴리율 0.5% 이상 할인일만 써요. "
+                       "거래가 적은 ETF는 표시된 가격에 실제로 사고팔기 어려울 수 있어요.")
+            with st.expander("거래 목록 (당일 매수)"):
+                show = d0[["종목코드", "매수일", "보유일", "매수 괴리율", "초과수익", "순초과수익"]].copy()
+                show.insert(0, "종목", show.pop("종목코드").map(short_name))
+                show["매수일"] = show["매수일"].dt.date
+                st.dataframe(show.sort_values("매수일", ascending=False).round(2), hide_index=True,
+                             use_container_width=True)
+
+    with tab3:
+        sens = run_sensitivity(latest, core.ENGINE_VERSION)
+        st.markdown('<div class="lead"><b>창</b>은 "평소"를 정하는 기간이에요. 10일은 기준이 빨리 바뀌어 경보가 많고, '
+                    '60일은 안정적이지만 서서히 커지는 괴리는 늦게 잡아요. <b>Z 기준</b>은 얼마나 튀어야 경보인지예요. '
+                    '★가 보고서 기본값(20일, Z&gt;2)이에요.</div>', unsafe_allow_html=True)
+        avg = sens.groupby(["창", "Z"]).agg(위험일=("위험일", "sum"), 축소5=("축소5", "mean"),
+                                           수익률차=("5일 수익률차", "mean")).reset_index()
+        lo5, hi5 = avg["축소5"].min(), avg["축소5"].max()
+        st.markdown(f"""<div class="hero green"><div class="big">9가지 설정 모두 5일 뒤 {lo5:.0f}~{hi5:.0f}% 괴리 축소</div>
+<div class="one">설정을 바꾸면 위험일 수는 {int(avg['위험일'].min())}~{int(avg['위험일'].max())}번(4종 합계)으로 크게 달라지지만,
+"위험일 뒤 괴리가 줄어든다"는 결론은 그대로예요.</div></div>""", unsafe_allow_html=True)
+        pv = avg.assign(칸=[f"{'★ ' if (w == 20 and z == 2.0) else ''}{n}일 · {r:.0f}%" for w, z, n, r in
+                           zip(avg["창"], avg["Z"], avg["위험일"], avg["축소5"])])
+        grid = pv.pivot(index="창", columns="Z", values="칸")
+        grid.index = [f"창 {w}일" for w in grid.index]
+        grid.columns = [f"Z>{z}" for z in grid.columns]
+        st.markdown("**위험일 수 · 5일 뒤 괴리 줄어든 비율** (4종 합계·평균)")
+        st.dataframe(grid, use_container_width=True)
+        pick = st.pills("종목별로 보기", [short_name(c) for c in REPORT4], key="sens_pick")
+        if pick:
+            code = {short_name(c): c for c in REPORT4}[pick]
+            one = sens[sens["종목코드"] == code]
+            one = one.assign(설정=[f"{'★ ' if (w == 20 and z == 2.0) else ''}{w}일·Z>{z}" for w, z in zip(one["창"], one["Z"])])
+            st.dataframe(one[["설정", "위험일", "축소1", "축소5", "축소20", "5일 수익률차"]].rename(columns={
+                "축소1": "1일 축소%", "축소5": "5일 축소%", "축소20": "20일 축소%", "5일 수익률차": "5일 NAV 대비(%p)"}).round(1),
+                hide_index=True, use_container_width=True)
+        st.caption("60일 창은 보관 데이터 시작(2025-09-01) 때문에 기간 초반 며칠은 판정하지 못해요.")
+
+
+{"🚨 오늘의 경보": page_alarm, "🔎 종목 분석": page_ticker, "🧪 전략 실험": page_lab, "✅ 검증": page_check}[page]()
