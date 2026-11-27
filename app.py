@@ -47,7 +47,7 @@ h1, h2, h3 {{ letter-spacing: -0.02em; }}
 
 # ---------------------------------------------------------------- 데이터 준비
 @st.cache_data(ttl=3600, show_spinner=False)
-def load(_refresh_token: int, offline: bool):
+def load(_refresh_token: int, offline: bool, engine_version: int):
     df = core.load_cache()
     if offline:   # 발표장 네트워크 장애 대비: 저장된 데이터만 사용, KRX 호출 없음
         return core.add_signals(df), [], None
@@ -70,7 +70,10 @@ if "pending_code" in st.session_state:  # 카드에서 '자세히'를 누르면 
     st.session_state.page = "🔎 종목 분석"
 
 with st.spinner("데이터 준비 중…"):
-    sig, got, err = load(st.session_state.refresh, st.session_state.offline)
+    sig, got, err = load(st.session_state.refresh, st.session_state.offline, core.ENGINE_VERSION)
+if not {"NAV주도", "극단일", "일수익률"} <= set(sig.columns):   # 혹시 옛 캐시가 남아 있으면 비우고 다시
+    st.cache_data.clear()
+    st.rerun()
 
 latest = sig["일자"].max()
 names = sig.sort_values("일자").groupby("종목코드")["종목명"].last()

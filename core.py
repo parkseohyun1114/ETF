@@ -17,6 +17,9 @@ import pandas as pd
 from krx_api import fetch_day, weekdays, kst_today, KRXError
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "etf_daily.parquet")
+# 신호 계산 방식(컬럼)이 바뀔 때마다 올린다. app.py의 캐시 키에 들어가서,
+# 재배포 후 옛 형식의 캐시가 남아 KeyError가 나는 것을 막는다.
+ENGINE_VERSION = 2
 WINDOW = 20
 Z_TH = 2.0
 H = [1, 5, 20]
