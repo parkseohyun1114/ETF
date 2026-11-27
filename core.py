@@ -79,6 +79,16 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["기준표준편차"] = roll.std(ddof=1).reset_index(level=0, drop=True)
     sd = df["기준표준편차"].where(df["기준표준편차"] > 1e-6)
     df["Z"] = (df["괴리율"] - df["기준평균"]) / sd
+    # 가격제한폭 근처 극단일: 하루 등락이 제한폭(일반 ±30%, 2배 레버리지·인버스2X는 ±60%)의 80% 이상
+    df["일수익률"] = df.groupby("종목코드", sort=False)["종가"].pct_change() * 100
+    mult = np.where(df["종목명"].str.contains("레버리지|2X", regex=True), 2, 1)
+    df["제한폭"] = 30.0 * mult
+    df["극단일"] = df["일수익률"].abs() >= 0.8 * df["제한폭"]
+    # NAV 주도형: 가격은 거의 그대로인데 NAV가 떨어져서 괴리가 생긴 날.
+    # 분배금(배당) 반영·해외 시차 등으로 생길 수 있어, 가격이 튄 경보와 따로 보여준다.
+    nav_r = df.groupby("종목코드", sort=False)["NAV"].pct_change() * 100
+    d_chg = df["괴리율"] - g.shift(1)
+    df["NAV주도"] = (nav_r < -0.2) & (-nav_r >= 0.6 * d_chg)
     # 거래가 없던 날(거래정지 등)은 가격이 멈춰 있어 괴리율이 비정상이므로 판정 제외
     tradable = df["거래량"].fillna(0) > 0
     df["위험일"] = (df["Z"] > Z_TH) & (df["괴리율"] > 0) & tradable
@@ -107,6 +117,13 @@ def scan(sig: pd.DataFrame, day=None) -> pd.DataFrame:
     alarms = alarms.join(rec, on="종목코드")
     alarms["과거위험일"] = alarms["과거위험일"].fillna(0).astype(int)
     return alarms.sort_values("Z", ascending=False)
+
+
+def scan_discount(sig: pd.DataFrame, day=None, min_gap=0.5) -> pd.DataFrame:
+    """할인일: 평소보다 유난히 싸게 거래된 ETF (Z < -2 이고 괴리율 < -min_gap)."""
+    day = sig["일자"].max() if day is None else day
+    t = sig[(sig["일자"] == day) & (sig["거래량"].fillna(0) > 0)]
+    return t[(t["Z"] < -Z_TH) & (t["괴리율"] <= -min_gap)].sort_values("Z")
 
 
 def pooled_stats(sig: pd.DataFrame, end, days=365) -> dict:
